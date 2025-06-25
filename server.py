@@ -18,8 +18,7 @@ from helper.auth import (
     blacklist_token,
     decode_and_verify_token
 )
-from helper.downloader_proxy import call_node_downloader
-from starlette.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 
 dotenv.load_dotenv()
 
@@ -209,20 +208,17 @@ def proxy_download(
     platform: str = Query(..., enum=["youtube", "instagram", "facebook"]),
     url: str = Query(...),
     quality: int = Query(3),
-    download: bool = Query(False, description="Force download instead of streaming"),
+    download: bool = Query(False),
     db: Session = Depends(get_db)
 ):
     token = None
-
     if Authorization:
         try:
             token = Authorization.split(" ")[1]
-            user_data = decode_and_verify_token(token, db)
-            # Optional: simpan log download ke DB
+            decode_and_verify_token(token, db)
         except Exception:
             raise HTTPException(status_code=401, detail="Invalid token")
 
-    # Buat URL ke Node.js API berdasarkan platform
     node_url = f"{os.getenv('NODE_API_BASE')}/{platform}-download"
     params = {"url": url}
     if platform == "youtube":
@@ -235,100 +231,45 @@ def proxy_download(
 
         node_response = requests.get(node_url, params=params, headers=headers, stream=True)
 
-        def stream_response_from_node():
-            for chunk in node_response.iter_content(chunk_size=8192):
-                if chunk:
-                    yield chunk
+        if platform == "youtube":
+            # Download sebagai buffer
+            content = node_response.content
+            headers_resp = {
+                "Content-Disposition": f'attachment; filename="youtube_video.mp4"' if download else 'inline',
+                "Accept-Ranges": "bytes",
+                "Cache-Control": "no-cache"
+            }
 
-        # Prepare headers for response
-        response_headers = {
-            "Accept-Ranges": "bytes",
-            "Cache-Control": "no-cache",
-        }
-        
-        # Add Content-Length if available
-        if node_response.headers.get("Content-Length"):
-            response_headers["Content-Length"] = node_response.headers.get("Content-Length")
-        
-        # Set Content-Disposition based on download parameter
-        if download:
-            response_headers["Content-Disposition"] = f'attachment; filename="{platform}_video.mp4"'
+            content_length = node_response.headers.get("Content-Length")
+            if content_length and content_length.isdigit():
+                headers_resp["Content-Length"] = content_length
+
+            return Response(
+                content=content,
+                media_type="video/mp4",
+                headers=headers_resp
+            )
         else:
-            response_headers["Content-Disposition"] = f'inline; filename="{platform}_video.mp4"'
+            # Streaming response
+            def stream_response_from_node():
+                for chunk in node_response.iter_content(chunk_size=8192):
+                    if chunk:
+                        yield chunk
 
-        # Determine media type based on platform and response
-        content_type = node_response.headers.get("Content-Type", "video/mp4")
-        if not content_type.startswith("video/"):
-            content_type = "video/mp4"
+            headers_resp = {
+                "Content-Disposition": f'attachment; filename="{platform}_video.mp4"' if download else 'inline',
+                "Accept-Ranges": "bytes",
+                "Cache-Control": "no-cache"
+            }
 
-        return StreamingResponse(
-            stream_response_from_node(),
-            media_type=content_type,
-            headers=response_headers
-        )
+            content_length = node_response.headers.get("Content-Length")
+            if content_length and content_length.isdigit():
+                headers_resp["Content-Length"] = content_length
+
+            return StreamingResponse(
+                stream_response_from_node(),
+                media_type=node_response.headers.get("Content-Type", "video/mp4"),
+                headers=headers_resp
+            )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Downloader error: {str(e)}")
-
-@app.get("/stream")
-def stream_video(
-    Authorization: str = Header(default=None),
-    platform: str = Query(..., enum=["youtube", "instagram", "facebook"]),
-    url: str = Query(...),
-    quality: int = Query(3),
-    db: Session = Depends(get_db)
-):
-    """
-    Stream video endpoint for video playback in browsers/players
-    Uses GET method which is more appropriate for streaming
-    """
-    token = None
-
-    if Authorization:
-        try:
-            token = Authorization.split(" ")[1]
-            user_data = decode_and_verify_token(token, db)
-            # Optional: simpan log stream ke DB
-        except Exception:
-            raise HTTPException(status_code=401, detail="Invalid token")
-
-    # Buat URL ke Node.js API berdasarkan platform
-    node_url = f"{os.getenv('NODE_API_BASE')}/{platform}-download"
-    params = {"url": url}
-    if platform == "youtube":
-        params["quality"] = str(quality)
-
-    try:
-        headers = {}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-
-        node_response = requests.get(node_url, params=params, headers=headers, stream=True)
-
-        def stream_response_from_node():
-            for chunk in node_response.iter_content(chunk_size=8192):
-                if chunk:
-                    yield chunk
-
-        # Headers optimized for video streaming
-        response_headers = {
-            "Accept-Ranges": "bytes",
-            "Cache-Control": "public, max-age=3600",
-            "Content-Disposition": "inline"
-        }
-        
-        # Add Content-Length if available
-        if node_response.headers.get("Content-Length"):
-            response_headers["Content-Length"] = node_response.headers.get("Content-Length")
-
-        # Use the content type from Node.js response or default to video/mp4
-        content_type = node_response.headers.get("Content-Type", "video/mp4")
-        if not content_type.startswith("video/"):
-            content_type = "video/mp4"
-
-        return StreamingResponse(
-            stream_response_from_node(),
-            media_type=content_type,
-            headers=response_headers
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Streaming error: {str(e)}")

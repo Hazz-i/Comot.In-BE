@@ -11,7 +11,6 @@ from .auth import (
     is_token_blacklisted,
     decode_and_verify_token
 )
-from .downloader_proxy import call_node_downloader
 
 __all__ = [
     'hash_password', 
