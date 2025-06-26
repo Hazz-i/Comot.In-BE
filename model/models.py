@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
+from sqlalchemy.orm import relationship
 from utils.database import Base
 import datetime
 
@@ -9,6 +10,9 @@ class User(Base):
     email = Column(String, unique=True, index=True)
     password = Column(String) 
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    
+    # Relationship dengan DownloadHistory
+    download_history = relationship("DownloadHistory", back_populates="user")
 
 class BlacklistedToken(Base):
     __tablename__ = "blacklisted_tokens"
@@ -16,3 +20,14 @@ class BlacklistedToken(Base):
     token = Column(String, unique=True, index=True)
     blacklisted_on = Column(DateTime, default=datetime.datetime.utcnow)
     expires_at = Column(DateTime)  # Untuk cleanup otomatis token yang sudah expired
+
+class DownloadHistory(Base):
+    __tablename__ = "download_history"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    platform = Column(String, nullable=False)  # youtube, instagram, facebook
+    original_url = Column(Text, nullable=False)  # URL asli yang di-download
+    downloaded_at = Column(DateTime, default=datetime.datetime.utcnow)
+    
+    # Relationship dengan User
+    user = relationship("User", back_populates="download_history")

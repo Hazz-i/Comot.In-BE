@@ -9,7 +9,7 @@ import requests
 
 # Import dari modules lokal
 from utils.database import SessionLocal, engine
-from model.models import Base, User, BlacklistedToken
+from model.models import Base, User, BlacklistedToken, DownloadHistory
 from helper.auth import (
     hash_password, 
     verify_password, 
@@ -19,6 +19,8 @@ from helper.auth import (
     decode_and_verify_token
 )
 from fastapi.responses import StreamingResponse, Response
+from sqlalchemy import func
+
 
 dotenv.load_dotenv()
 
@@ -60,6 +62,19 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     login: str  # Bisa email atau username
     password: str
+
+class DownloadHistoryResponse(BaseModel):
+    id: int
+    platform: str
+    original_url: str
+    downloaded_at: str
+    
+    class Config:
+        from_attributes = True
+
+class DownloadHistoryRequest(BaseModel):
+    platform: str  # youtube, instagram, facebook
+    original_url: str
 
 @app.post("/register")
 def register(req: RegisterRequest, db: Session = Depends(get_db)):
@@ -212,10 +227,13 @@ def proxy_download(
     db: Session = Depends(get_db)
 ):
     token = None
+    user = None
     if Authorization:
         try:
             token = Authorization.split(" ")[1]
-            decode_and_verify_token(token, db)
+            decoded = decode_and_verify_token(token, db)
+            # Get user from decoded token
+            user = db.query(User).filter(User.username == decoded["sub"]).first()
         except Exception:
             raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -230,6 +248,17 @@ def proxy_download(
             headers["Authorization"] = f"Bearer {token}"
 
         node_response = requests.get(node_url, params=params, headers=headers, stream=True)
+
+        # Save download history if user is authenticated
+        download_history = None
+        if user:
+            download_history = DownloadHistory(
+                user_id=user.id,
+                platform=platform,
+                original_url=url
+            )
+            db.add(download_history)
+            db.commit()
 
         if platform == "youtube":
             # Download sebagai buffer
@@ -272,4 +301,128 @@ def proxy_download(
                 headers=headers_resp
             )
     except Exception as e:
+        # If there's an error and download history was created, we could delete it
+        if user and download_history:
+            db.delete(download_history)
+            db.commit()
         raise HTTPException(status_code=500, detail=f"Downloader error: {str(e)}")
+
+# Download History Routes
+@app.get("/download-history", response_model=list[DownloadHistoryResponse])
+def get_download_history(
+    Authorization: str = Header(...),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    platform: str = Query(None, enum=["youtube", "instagram", "facebook"]),
+    db: Session = Depends(get_db)
+):
+    """Get download history for authenticated user"""
+    try:
+        token = Authorization.split(" ")[1]
+        decoded = decode_and_verify_token(token, db)
+        user = db.query(User).filter(User.username == decoded["sub"]).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        query = db.query(DownloadHistory).filter(DownloadHistory.user_id == user.id)
+        
+        if platform:
+            query = query.filter(DownloadHistory.platform == platform)
+        
+        history = query.order_by(DownloadHistory.downloaded_at.desc()).offset(offset).limit(limit).all()
+        
+        # Format response
+        response = []
+        for item in history:
+            response.append(DownloadHistoryResponse(
+                id=item.id,
+                platform=item.platform,
+                original_url=item.original_url,
+                downloaded_at=item.downloaded_at.strftime("%Y-%m-%d %H:%M:%S")
+            ))
+        
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+@app.get("/download-history/stats")
+def get_download_stats(
+    Authorization: str = Header(...),
+    db: Session = Depends(get_db)
+):
+    """Get download statistics for authenticated user"""
+    try:
+        token = Authorization.split(" ")[1]
+        decoded = decode_and_verify_token(token, db)
+        user = db.query(User).filter(User.username == decoded["sub"]).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Total downloads
+        total_downloads = db.query(DownloadHistory).filter(DownloadHistory.user_id == user.id).count()
+        
+        # Downloads by platform
+        platform_stats = db.query(
+            DownloadHistory.platform,
+            func.count(DownloadHistory.id).label('count')
+        ).filter(DownloadHistory.user_id == user.id).group_by(DownloadHistory.platform).all()
+        
+        return {
+            "total_downloads": total_downloads,
+            "platform_breakdown": [{"platform": p[0], "count": p[1]} for p in platform_stats],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+@app.post("/download-history", response_model=DownloadHistoryResponse)
+def add_download_history(
+    request: DownloadHistoryRequest,
+    Authorization: str = Header(...),
+    db: Session = Depends(get_db)
+):
+    """Add download history entry for authenticated user"""
+    try:
+        token = Authorization.split(" ")[1]
+        decoded = decode_and_verify_token(token, db)
+        user = db.query(User).filter(User.username == decoded["sub"]).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Validate platform
+        valid_platforms = ["youtube", "instagram", "facebook"]
+        if request.platform not in valid_platforms:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid platform. Must be one of: {', '.join(valid_platforms)}"
+            )
+        
+        # Validate URL format
+        if not request.original_url.startswith(('http://', 'https://')):
+            raise HTTPException(status_code=400, detail="URL must start with http:// or https://")
+        
+        # Create new download history entry
+        download_history = DownloadHistory(
+            user_id=user.id,
+            platform=request.platform,
+            original_url=request.original_url
+        )
+        
+        db.add(download_history)
+        db.commit()
+        db.refresh(download_history)
+        
+        # Return the created entry
+        return DownloadHistoryResponse(
+            id=download_history.id,
+            platform=download_history.platform,
+            original_url=download_history.original_url,
+            downloaded_at=download_history.downloaded_at.strftime("%Y-%m-%d %H:%M:%S")
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to add download history: {str(e)}")
