@@ -208,11 +208,11 @@ def get_user_profile(Authorization: str = Header(...), db: Session = Depends(get
             "email": user.email,
             "role": user.role,
             "profile": {
-                "display_name": user.username,  # Bisa ditambah field display_name nanti
                 "member_since": user.created_at.strftime("%Y-%m-%d") if user.created_at else "Unknown",
                 "account_type": user.role  # Use actual role instead of hardcoded "regular"
             },
             "status": "active"
+            
         }
         
     except HTTPException:
