@@ -249,7 +249,11 @@ def proxy_download(
     download: bool = Query(False),
     db: Session = Depends(get_db)
 ):
+    # Initialize variables
+    user = None
     token = None
+    
+    # Only try to authenticate if Authorization header is provided
     if Authorization:
         try:
             token = Authorization.split(" ")[1]
@@ -257,7 +261,9 @@ def proxy_download(
             # Get user from decoded token
             user = db.query(User).filter(User.username == decoded["sub"]).first()
         except Exception:
-            raise HTTPException(status_code=401, detail="Invalid token")
+            # If token is invalid, continue without authentication
+            user = None
+            token = None
 
     node_url = f"{os.getenv('NODE_API_BASE')}/{platform}-download"
     params = {"url": url}
@@ -271,7 +277,7 @@ def proxy_download(
 
         node_response = requests.get(node_url, params=params, headers=headers, stream=True)
 
-        # Save download history if user is authenticated
+        # Save download history ONLY if user is authenticated
         download_history = None
         if user:
             download_history = DownloadHistory(
@@ -323,10 +329,13 @@ def proxy_download(
                 headers=headers_resp
             )
     except Exception as e:
-        # If there's an error and download history was created, we could delete it
+        # If there's an error and download history was created, delete it
         if user and download_history:
-            db.delete(download_history)
-            db.commit()
+            try:
+                db.delete(download_history)
+                db.commit()
+            except:
+                pass  # Ignore rollback errors
         raise HTTPException(status_code=500, detail=f"Downloader error: {str(e)}")
 
 # Download History Routes
