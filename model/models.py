@@ -14,7 +14,6 @@ class User(Base):
     
     # Relationship dengan DownloadHistory
     download_history = relationship("DownloadHistory", back_populates="user")
-    # Relationship dengan Reviews
     reviews = relationship("Reviews", back_populates="user")
 
 class BlacklistedToken(Base):
