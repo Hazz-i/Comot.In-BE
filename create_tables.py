@@ -122,6 +122,61 @@ def show_table_info():
     except Exception as e:
         print(f"❌ Error showing table info: {e}")
 
+def create_default_admin():
+    """Create default admin user during migration"""
+    try:
+        print("Creating default admin user...")
+        
+        # Import required modules
+        from model.models import User
+        from helper.auth import hash_password
+        from utils.database import SessionLocal
+        
+        # Create database session
+        db = SessionLocal()
+        
+        try:
+            # Check if admin user already exists
+            existing_admin = db.query(User).filter(
+                (User.username == "admin") | (User.role == "admin")
+            ).first()
+            
+            if existing_admin:
+                print(f"  ⚠️  Admin user already exists: {existing_admin.username}")
+                return True
+            
+            # Create default admin user
+            admin_user = User(
+                username="admin",
+                email="admin@comot.in",
+                password=hash_password("admin234"),
+                role="admin"
+            )
+            
+            db.add(admin_user)
+            db.commit()
+            
+            print("  ✅ Default admin user created successfully!")
+            print(f"     Username: admin")
+            print(f"     Email: admin@comot.in")
+            print(f"     Password: admin234")
+            print(f"     Role: admin")
+            print("\n  🚨 IMPORTANT: Change the default password after first login!")
+            
+            return True
+            
+        except Exception as e:
+            db.rollback()
+            print(f"  ❌ Error creating admin user: {e}")
+            return False
+            
+        finally:
+            db.close()
+            
+    except Exception as e:
+        print(f"❌ Failed to create admin user: {e}")
+        return False
+
 def main():
     """Main migration function"""
     print("🚀 Starting complete database migration...")
@@ -165,9 +220,32 @@ def main():
     print("Step 3: Showing created tables...")
     show_table_info()
     
+    print("\n" + "-"*30)
+    
+    # Step 4: Create default admin user
+    print("Step 4: Creating default admin user...")
+    if not create_default_admin():
+        print("⚠️  Warning: Failed to create admin user, but migration continued.")
+        print("   You can create an admin user manually later using:")
+        print("   POST /admin/register with admin_secret")
+    
     print("\n" + "="*50)
     print("🎉 Complete database migration finished successfully!")
     print("Your database is now clean and ready to use.")
+    print("\n📝 Default Admin Credentials:")
+    print("   Username: admin")
+    print("   Password: admin234")
+    print("   Email: admin@comot.in")
+    print("   Login URL: POST /admin/login")
+    print("\n🚨 SECURITY WARNING:")
+    print("   Please change the default admin password immediately!")
+    print("   Default credentials should only be used for initial setup.")
+    print("\n🔗 Available Admin Endpoints:")
+    print("   POST /admin/login - Admin authentication")
+    print("   GET /admin/users - Manage users")
+    print("   GET /admin/stats - System statistics")
+    print("   DELETE /admin/user/{id} - Delete users")
+    print("   PUT /admin/user/{id}/role - Change user roles")
 
 if __name__ == "__main__":
     main()

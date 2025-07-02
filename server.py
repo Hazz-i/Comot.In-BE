@@ -9,7 +9,7 @@ import requests
 
 # Import dari modules lokal
 from utils.database import SessionLocal, engine
-from model.models import Base, User, BlacklistedToken, DownloadHistory
+from model.models import Base, User, BlacklistedToken, DownloadHistory, Reviews
 from helper.auth import (
     hash_password, 
     verify_password, 
@@ -77,6 +77,26 @@ class DownloadHistoryRequest(BaseModel):
     platform: str  # youtube, instagram, facebook
     original_url: str
 
+class ReviewRequest(BaseModel):
+    score: int  # 1-5 stars
+    message: str
+
+class ReviewResponse(BaseModel):
+    id: int
+    score: int
+    message: str
+    created_at: str
+    username: str
+    
+    class Config:
+        from_attributes = True
+
+class AdminRegisterRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+    admin_secret: str
+
 @app.post("/register")
 def register(req: RegisterRequest, db: Session = Depends(get_db)):
     # Cek apakah username sudah ada
@@ -117,7 +137,8 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
         "access_token": token,
         "token_type": "bearer",
         "username": user.username,
-        "email": user.email
+        "email": user.email,
+        "role": user.role
     }
 
 @app.post("/logout")
@@ -185,10 +206,11 @@ def get_user_profile(Authorization: str = Header(...), db: Session = Depends(get
             "id": user.id,
             "username": user.username,
             "email": user.email,
+            "role": user.role,
             "profile": {
                 "display_name": user.username,  # Bisa ditambah field display_name nanti
                 "member_since": user.created_at.strftime("%Y-%m-%d") if user.created_at else "Unknown",
-                "account_type": "regular"  # Bisa ditambah role/type field nanti
+                "account_type": user.role  # Use actual role instead of hardcoded "regular"
             },
             "status": "active"
         }
@@ -228,7 +250,6 @@ def proxy_download(
     db: Session = Depends(get_db)
 ):
     token = None
-    user = None
     if Authorization:
         try:
             token = Authorization.split(" ")[1]
@@ -427,3 +448,361 @@ def add_download_history(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to add download history: {str(e)}")
+
+@app.delete("/download-history/{history_id}")
+def delete_download_history(
+    history_id: int,
+    Authorization: str = Header(...),
+    db: Session = Depends(get_db)
+):
+    """Delete a download history entry"""
+    try:
+        token = Authorization.split(" ")[1]
+        decoded = decode_and_verify_token(token, db)
+        user = db.query(User).filter(User.username == decoded["sub"]).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Find the download history entry
+        history_entry = db.query(DownloadHistory).filter(
+            DownloadHistory.id == history_id,
+            DownloadHistory.user_id == user.id
+        ).first()
+        
+        if not history_entry:
+            raise HTTPException(status_code=404, detail="Download history not found")
+        
+        db.delete(history_entry)
+        db.commit()
+        
+        return {"message": "Download history deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete download history: {str(e)}")
+
+# Reviews Routes
+@app.post("/reviews", response_model=ReviewResponse)
+def add_review(
+    request: ReviewRequest,
+    Authorization: str = Header(...),
+    db: Session = Depends(get_db)
+):
+    """Add a new review"""
+    try:
+        token = Authorization.split(" ")[1]
+        decoded = decode_and_verify_token(token, db)
+        user = db.query(User).filter(User.username == decoded["sub"]).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Validate score range
+        if not (1 <= request.score <= 5):
+            raise HTTPException(status_code=400, detail="Score must be between 1 and 5")
+        
+        # Validate message length
+        if len(request.message.strip()) < 10:
+            raise HTTPException(status_code=400, detail="Review message must be at least 10 characters")
+        
+        # Check if user already has a review (optional: limit one review per user)
+        existing_review = db.query(Reviews).filter(Reviews.user_id == user.id).first()
+        if existing_review:
+            raise HTTPException(status_code=400, detail="You have already submitted a review. Use PUT to update it.")
+        
+        # Create new review
+        review = Reviews(
+            user_id=user.id,
+            score=request.score,
+            message=request.message.strip()
+        )
+        
+        db.add(review)
+        db.commit()
+        db.refresh(review)
+        
+        return ReviewResponse(
+            id=review.id,
+            score=review.score,
+            message=review.message,
+            created_at=review.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            username=user.username
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to add review: {str(e)}")
+
+@app.get("/reviews", response_model=list[ReviewResponse])
+def get_reviews(
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    score_filter: int = Query(None, ge=1, le=5),
+    db: Session = Depends(get_db)
+):
+    """Get all reviews (public endpoint)"""
+    try:
+        query = db.query(Reviews, User).join(User, Reviews.user_id == User.id)
+        
+        if score_filter:
+            query = query.filter(Reviews.score == score_filter)
+        
+        reviews = query.order_by(Reviews.created_at.desc()).offset(offset).limit(limit).all()
+        
+        response = []
+        for review, user in reviews:
+            response.append(ReviewResponse(
+                id=review.id,
+                score=review.score,
+                message=review.message,
+                created_at=review.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                username=user.username
+            ))
+        
+        return response
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch reviews: {str(e)}")
+
+@app.get("/reviews/stats")
+def get_review_stats(db: Session = Depends(get_db)):
+    """Get review statistics (public endpoint)"""
+    try:
+        total_reviews = db.query(Reviews).count()
+        
+        if total_reviews == 0:
+            return {
+                "total_reviews": 0,
+                "average_score": 0,
+                "score_breakdown": {str(i): 0 for i in range(1, 6)}
+            }
+        
+        # Average score
+        avg_score = db.query(func.avg(Reviews.score)).scalar() or 0
+        
+        # Score breakdown
+        score_breakdown = {}
+        for i in range(1, 6):
+            count = db.query(Reviews).filter(Reviews.score == i).count()
+            score_breakdown[str(i)] = count
+        
+        return {
+            "total_reviews": total_reviews,
+            "average_score": round(float(avg_score), 2),
+            "score_breakdown": score_breakdown
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch review stats: {str(e)}")
+
+@app.get("/reviews/me", response_model=list[ReviewResponse])
+def get_my_reviews(
+    Authorization: str = Header(...),
+    db: Session = Depends(get_db)
+):
+    """Get reviews by the authenticated user"""
+    try:
+        token = Authorization.split(" ")[1]
+        decoded = decode_and_verify_token(token, db)
+        user = db.query(User).filter(User.username == decoded["sub"]).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        reviews = db.query(Reviews).filter(Reviews.user_id == user.id).order_by(Reviews.created_at.desc()).all()
+        
+        response = []
+        for review in reviews:
+            response.append(ReviewResponse(
+                id=review.id,
+                score=review.score,
+                message=review.message,
+                created_at=review.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                username=user.username
+            ))
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch your reviews: {str(e)}")
+
+@app.put("/reviews/{review_id}", response_model=ReviewResponse)
+def update_review(
+    review_id: int,
+    request: ReviewRequest,
+    Authorization: str = Header(...),
+    db: Session = Depends(get_db)
+):
+    """Update user's own review"""
+    try:
+        token = Authorization.split(" ")[1]
+        decoded = decode_and_verify_token(token, db)
+        user = db.query(User).filter(User.username == decoded["sub"]).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Find the review
+        review = db.query(Reviews).filter(
+            Reviews.id == review_id,
+            Reviews.user_id == user.id
+        ).first()
+        
+        if not review:
+            raise HTTPException(status_code=404, detail="Review not found or not owned by you")
+        
+        # Validate score and message
+        if not (1 <= request.score <= 5):
+            raise HTTPException(status_code=400, detail="Score must be between 1 and 5")
+        
+        if len(request.message.strip()) < 10:
+            raise HTTPException(status_code=400, detail="Review message must be at least 10 characters")
+        
+        # Update review
+        review.score = request.score
+        review.message = request.message.strip()
+        
+        db.commit()
+        db.refresh(review)
+        
+        return ReviewResponse(
+            id=review.id,
+            score=review.score,
+            message=review.message,
+            created_at=review.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            username=user.username
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update review: {str(e)}")
+
+@app.delete("/reviews/{review_id}")
+def delete_review(
+    review_id: int,
+    Authorization: str = Header(...),
+    db: Session = Depends(get_db)
+):
+    """Delete user's own review"""
+    try:
+        token = Authorization.split(" ")[1]
+        decoded = decode_and_verify_token(token, db)
+        user = db.query(User).filter(User.username == decoded["sub"]).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Find the review
+        review = db.query(Reviews).filter(
+            Reviews.id == review_id,
+            Reviews.user_id == user.id
+        ).first()
+        
+        if not review:
+            raise HTTPException(status_code=404, detail="Review not found or not owned by you")
+        
+        db.delete(review)
+        db.commit()
+        
+        return {"message": "Review deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete review: {str(e)}")
+
+# Admin Routes
+@app.get("/admin/users")
+def admin_get_users(
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    role_filter: str = Query(None, enum=["user", "admin"]),
+    db: Session = Depends(get_db)
+):
+    """Admin: Get all users"""
+    try:
+        query = db.query(User)
+        
+        if role_filter:
+            query = query.filter(User.role == role_filter)
+        
+        users = query.offset(offset).limit(limit).all()
+        
+        response = []
+        for user in users:
+            user_stats = {
+                "download_count": db.query(DownloadHistory).filter(DownloadHistory.user_id == user.id).count(),
+                "review_count": db.query(Reviews).filter(Reviews.user_id == user.id).count()
+            }
+            
+            response.append({
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "role": user.role,
+                "created_at": user.created_at.strftime("%Y-%m-%d %H:%M:%S") if user.created_at else "Unknown",
+                "stats": user_stats
+            })
+        
+        return response
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch users: {str(e)}")
+
+@app.get("/admin/stats")
+def admin_get_stats(
+    db: Session = Depends(get_db)
+):
+    """Admin: Get system statistics"""
+    try:
+        total_users = db.query(User).count()
+        total_admins = db.query(User).filter(User.role == "admin").count()
+        total_downloads = db.query(DownloadHistory).count()
+        total_reviews = db.query(Reviews).count()
+        
+        # Downloads by platform
+        platform_stats = db.query(
+            DownloadHistory.platform,
+            func.count(DownloadHistory.id).label('count')
+        ).group_by(DownloadHistory.platform).all()
+        
+        # Reviews by score
+        review_stats = db.query(
+            Reviews.score,
+            func.count(Reviews.id).label('count')
+        ).group_by(Reviews.score).all()
+        
+        # Recent activity (last 7 days)
+        from datetime import datetime, timedelta
+        week_ago = datetime.utcnow() - timedelta(days=7)
+        
+        recent_users = db.query(User).filter(User.created_at >= week_ago).count()
+        recent_downloads = db.query(DownloadHistory).filter(DownloadHistory.downloaded_at >= week_ago).count()
+        recent_reviews = db.query(Reviews).filter(Reviews.created_at >= week_ago).count()
+        
+        return {
+            "system": {
+                "total_users": total_users,
+                "total_admins": total_admins,
+                "total_downloads": total_downloads,
+                "total_reviews": total_reviews
+            },
+            "breakdowns": {
+                "downloads_by_platform": [{"platform": p[0], "count": p[1]} for p in platform_stats],
+                "reviews_by_score": [{"score": r[0], "count": r[1]} for r in review_stats]
+            },
+            "recent_activity": {
+                "new_users_last_7_days": recent_users,
+                "downloads_last_7_days": recent_downloads,
+                "reviews_last_7_days": recent_reviews
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch admin stats: {str(e)}")

@@ -9,10 +9,13 @@ class User(Base):
     username = Column(String, unique=True, index=True)
     email = Column(String, unique=True, index=True)
     password = Column(String) 
+    role = Column(String, default="user")  # user, admin
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     
     # Relationship dengan DownloadHistory
     download_history = relationship("DownloadHistory", back_populates="user")
+    # Relationship dengan Reviews
+    reviews = relationship("Reviews", back_populates="user")
 
 class BlacklistedToken(Base):
     __tablename__ = "blacklisted_tokens"
@@ -31,3 +34,14 @@ class DownloadHistory(Base):
     
     # Relationship dengan User
     user = relationship("User", back_populates="download_history")
+
+class Reviews(Base):
+    __tablename__ = "reviews"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    score = Column(Integer, nullable=False)  # Rating score (e.g., 1-5 stars)
+    message = Column(Text, nullable=False)  # Review message/comment
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    
+    # Relationship dengan User
+    user = relationship("User", back_populates="reviews")
