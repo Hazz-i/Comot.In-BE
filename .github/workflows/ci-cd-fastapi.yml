@@ -35,7 +35,7 @@ jobs:
             pip install -r requirements.txt
           else
             echo "⚠️ requirements.txt not found, installing basic dependencies..."
-            pip install fastapi uvicorn
+            pip install fastapi uvicorn psycopg2-binary
           fi
 
       - name: Check Python syntax
@@ -94,7 +94,7 @@ jobs:
             echo "📥 Cloning repository..."
             git clone https://github.com/${{ github.repository }} .
 
-            # Check Dockerfile
+            # Handle Dockerfile naming
             if [ -f "dockerfile" ] && [ ! -f "Dockerfile" ]; then
               echo "📝 Renaming dockerfile to Dockerfile..."
               mv dockerfile Dockerfile
@@ -106,13 +106,18 @@ jobs:
               exit 1
             fi
 
-            # Create requirements if missing
+            # Create requirements with PostgreSQL support
             if [ ! -f "requirements.txt" ]; then
               echo "📝 Creating requirements.txt..."
               cat > requirements.txt << 'EOF'
             fastapi==0.104.1
             uvicorn[standard]==0.24.0
             pydantic==2.5.0
+            sqlalchemy==1.4.23
+            psycopg2-binary==2.9.7
+            python-multipart==0.0.6
+            python-jose[cryptography]==3.3.0
+            passlib[bcrypt]==1.7.4
             EOF
             fi
 
@@ -122,12 +127,24 @@ jobs:
 
             # Build image
             echo "🔨 Building Docker image..."
-            docker build -t comot-api:latest .
+            docker build -t comot-api:latest . || {
+              echo "❌ Docker build failed"
+              exit 1
+            }
 
-            # Create env file
+            # Create .env file exactly like your local version
+            echo "📝 Creating .env file..."
             cat > .env << 'EOF'
-            PORT=9000
-            ENVIRONMENT=production
+            POSTGRES_USER=${{ secrets.POSTGRES_USER }}
+            POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+            POSTGRES_HOST=${{ secrets.POSTGRES_HOST }}
+            POSTGRES_PORT=${{ secrets.POSTGRES_PORT }}
+            POSTGRES_DB=${{ secrets.POSTGRES_DB }}
+
+            URL=${{ secrets.URL }}
+            JWT_SECRET=${{ secrets.JWT_SECRET }}
+
+            NODE_API_BASE=${{ secrets.NODE_API_BASE }}
             EOF
 
             # Run container
@@ -137,17 +154,47 @@ jobs:
               --env-file .env \
               -p 9000:9000 \
               --restart unless-stopped \
-              comot-api:latest
-
-            # Wait and health check
-            sleep 15
-            if curl -f -s http://localhost:9000/ >/dev/null 2>&1; then
-              echo "✅ Deployment successful!"
-            else
-              echo "❌ Health check failed"
-              docker logs comot-api --tail 20
+              --memory=512m \
+              --cpus=1.0 \
+              comot-api:latest || {
+              echo "❌ Failed to start container"
+              docker logs comot-api --tail 30
               exit 1
-            fi
+            }
+
+            # Wait for startup
+            echo "⏳ Waiting for application startup..."
+            sleep 25
+
+            # Health check
+            echo "🏥 Performing health check..."
+            for i in {1..8}; do
+              if curl -f -s http://localhost:9000/health >/dev/null 2>&1; then
+                echo "✅ Health check passed!"
+                break
+              elif curl -f -s http://localhost:9000/ >/dev/null 2>&1; then
+                echo "✅ Root endpoint responding!"
+                break
+              else
+                echo "⏳ Health check attempt $i failed, retrying..."
+                sleep 10
+              fi
+              
+              if [ $i -eq 8 ]; then
+                echo "❌ Health check failed after 8 attempts"
+                echo "📋 Container logs:"
+                docker logs comot-api --tail 40
+                echo "📊 Container status:"
+                docker ps -a | grep comot-api
+                exit 1
+              fi
+            done
+
+            # Clean up env file for security
+            rm -f .env
+
+            echo "🎉 Deployment successful!"
+            echo "🌐 API accessible at: http://${{ secrets.VPS_HOST }}:9000"
 
   # ========================================
   # JOB 3: NOTIFICATION
