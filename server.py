@@ -6,6 +6,7 @@ import os
 import dotenv
 
 import requests
+import datetime
 
 # Import dari modules lokal
 from utils.database import SessionLocal, engine
@@ -815,3 +816,20 @@ def admin_get_stats(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch admin stats: {str(e)}")
+
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "timestamp": datetime.datetime.utcnow()}
+
+@app.get("/")
+def root():
+    return {"message": "Comot.in API is running", "status": "ok"}
+
+@app.get("/db-test")
+def test_database_connection(db: Session = Depends(get_db)):
+    try:
+        # Test simple query
+        db.execute("SELECT 1")
+        return {"status": "connected", "database": "postgresql"}
+    except Exception as e:
+        return {"status": "disconnected", "error": str(e)}

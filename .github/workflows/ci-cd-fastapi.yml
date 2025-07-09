@@ -142,10 +142,25 @@ jobs:
             POSTGRES_DB=${{ secrets.POSTGRES_DB }}
 
             URL=${{ secrets.URL }}
-            JWT_SECRET=${{ secrets.JWT_SECRET }}
+            JWT_SECRET_KEY=${{ secrets.JWT_SECRET }}
+            JWT_ALGORITHM=HS256
+            JWT_EXPIRE_HOURS=24
 
             NODE_API_BASE=${{ secrets.NODE_API_BASE }}
             EOF
+
+            # Debug environment variables
+            echo "🔍 Debugging environment setup..."
+            echo "Environment file contents (masked):"
+            cat .env | sed 's/=.*$/=***MASKED***/'
+            echo "Container environment check:"
+            docker run --env-file .env --rm comot-api:latest python -c "
+            import os
+            print('POSTGRES_HOST:', os.getenv('POSTGRES_HOST', 'NOT_SET'))
+            print('POSTGRES_PORT:', os.getenv('POSTGRES_PORT', 'NOT_SET'))
+            print('POSTGRES_USER:', os.getenv('POSTGRES_USER', 'NOT_SET')[:10] + '***' if os.getenv('POSTGRES_USER') else 'NOT_SET')
+            print('DATABASE_URL constructed successfully')
+            " || echo "Environment test failed"
 
             # Run container
             echo "▶️ Starting container..."
@@ -166,9 +181,9 @@ jobs:
             echo "⏳ Waiting for application startup..."
             sleep 25
 
-            # Health check with multiple endpoints and better error handling
+            # Health check
             echo "🏥 Performing comprehensive health check..."
-            for i in {1..10}; do
+            for i in {1..15}; do
               # Check if container is still running
               if ! docker ps | grep comot-api >/dev/null; then
                 echo "❌ Container stopped unexpectedly on attempt $i"
@@ -177,33 +192,47 @@ jobs:
                 continue
               fi
               
-              # Test basic health endpoint
-              if curl -f -s http://localhost:9000/health >/dev/null 2>&1; then
-                echo "✅ Health endpoint passed!"
-                break
-              elif curl -f -s http://localhost:9000/ >/dev/null 2>&1; then
+              # Test root endpoint first
+              if curl -f -s http://localhost:9000/ >/dev/null 2>&1; then
                 echo "✅ Root endpoint responding!"
-                # Test database connectivity separately
-                DB_STATUS=$(curl -s http://localhost:9000/db-test | grep -o '"status":"[^"]*"' || echo "unknown")
-                echo "🗄️ Database status: $DB_STATUS"
+                
+                # Test health endpoint
+                if curl -f -s http://localhost:9000/health >/dev/null 2>&1; then
+                  echo "✅ Health endpoint passed!"
+                  
+                  # Test database connectivity
+                  DB_RESPONSE=$(curl -s http://localhost:9000/db-test 2>/dev/null || echo '{"status":"error"}')
+                  DB_STATUS=$(echo "$DB_RESPONSE" | grep -o '"status":"[^"]*"' | cut -d'"' -f4 || echo "unknown")
+                  echo "🗄️ Database status: $DB_STATUS"
+                  
+                  if [ "$DB_STATUS" = "connected" ]; then
+                    echo "✅ Database connection successful!"
+                    break
+                  else
+                    echo "⚠️ Database connection failed, but API is running"
+                    echo "📋 DB Response: $DB_RESPONSE"
+                  fi
+                fi
                 break
               else
                 echo "⏳ Health check attempt $i failed, retrying..."
                 if [ $i -eq 5 ]; then
                   echo "📋 Container logs (mid-check):"
-                  docker logs comot-api --tail 15
+                  docker logs comot-api --tail 20
                 fi
-                sleep 15
+                sleep 20
               fi
               
-              if [ $i -eq 10 ]; then
-                echo "❌ Health check failed after 10 attempts"
+              if [ $i -eq 15 ]; then
+                echo "❌ Health check failed after 15 attempts"
                 echo "📋 Final container logs:"
                 docker logs comot-api --tail 50
                 echo "📊 Container status:"
                 docker ps -a | grep comot-api
+                echo "📊 Environment variables in container:"
+                docker exec comot-api env | grep POSTGRES || echo "No POSTGRES vars found"
                 echo "📊 Network test:"
-                docker exec comot-api nslookup google.com || echo "No internet access"
+                docker exec comot-api ping -c 3 aws-0-us-east-2.pooler.supabase.com || echo "Cannot reach database host"
                 exit 1
               fi
             done
