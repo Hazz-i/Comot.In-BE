@@ -125,21 +125,49 @@ jobs:
           script: |
             echo "🚀 Starting deployment process..."
 
-            # Navigate to app directory
-            cd ~/apps/comot-in || {
-              echo "📁 Creating application directory..."
-              mkdir -p ~/apps/comot-in
-              cd ~/apps/comot-in
-              git clone https://github.com/${{ github.repository }} .
-            }
+            # Clean up and prepare directory
+            if [ -d "~/apps/comot-in" ]; then
+              echo "🗑️ Cleaning existing directory..."
+              rm -rf ~/apps/comot-in
+            fi
 
-            # Pull latest changes
-            echo "📥 Pulling latest code..."
-            git fetch origin
-            git reset --hard origin/master
-            git pull origin master
+            # Create fresh directory and clone
+            echo "📁 Creating application directory..."
+            mkdir -p ~/apps/comot-in
+            cd ~/apps/comot-in
 
-            # Backup current image before stopping
+            # Clone repository
+            echo "📥 Cloning repository..."
+            git clone https://github.com/${{ github.repository }} .
+
+            # Check for Dockerfile (case insensitive)
+            if [ -f "dockerfile" ] && [ ! -f "Dockerfile" ]; then
+              echo "📝 Renaming dockerfile to Dockerfile..."
+              mv dockerfile Dockerfile
+            fi
+
+            # Verify required files exist
+            if [ ! -f "Dockerfile" ]; then
+              echo "❌ Dockerfile not found in repository"
+              echo "📁 Files in directory:"
+              ls -la
+              exit 1
+            fi
+
+            echo "✅ Dockerfile found"
+
+            # Check requirements.txt
+            if [ ! -f "requirements.txt" ]; then
+              echo "📝 Creating basic requirements.txt..."
+              cat > requirements.txt << 'EOF'
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+python-multipart==0.0.6
+EOF
+            fi
+
+            # Backup current image if exists
             if docker images -q comot-api:latest >/dev/null 2>&1; then
               echo "💾 Creating backup of current image..."
               docker tag comot-api:latest comot-api:backup || true
@@ -150,26 +178,27 @@ jobs:
             docker stop comot-api 2>/dev/null || echo "Container not running"
             docker rm comot-api 2>/dev/null || echo "Container not found"
 
-            # Build new image
+            # Build new image with verbose output
             echo "🔨 Building new Docker image..."
-            docker build -t comot-api:latest .
-
-            # Verify build success
-            if [ $? -ne 0 ]; then
+            docker build -t comot-api:latest . --no-cache || {
               echo "❌ Docker build failed"
+              echo "📋 Build context files:"
+              ls -la
+              echo "📋 Dockerfile content:"
+              cat Dockerfile
               exit 1
-            fi
+            }
 
-            # Create .env file if it doesn't exist
-            if [ ! -f .env ]; then
-              echo "📝 Creating default .env file..."
-              cat > .env << EOF
-            PORT=9000
-            ENVIRONMENT=production
-            EOF
-            fi
+            echo "✅ Docker image built successfully"
 
-            # Run new container with correct port mapping
+            # Create .env file
+            echo "📝 Creating .env file..."
+            cat > .env << 'EOF'
+PORT=9000
+ENVIRONMENT=production
+EOF
+
+            # Run new container
             echo "▶️ Starting new container on port 9000..."
             docker run -d \
               --name comot-api \
@@ -178,38 +207,41 @@ jobs:
               --restart unless-stopped \
               --memory=512m \
               --cpus=1.0 \
-              comot-api:latest
-
-            # Verify container start
-            if [ $? -ne 0 ]; then
+              comot-api:latest || {
               echo "❌ Failed to start container"
+              echo "📋 Container logs:"
+              docker logs comot-api 2>/dev/null || true
               exit 1
-            fi
+            }
 
             # Wait for startup
             echo "⏳ Waiting for application startup..."
             sleep 20
 
-            # Health check on port 9000
-            echo "🏥 Performing health check on port 9000..."
-            for i in {1..5}; do
-              if curl -f -s http://localhost:9000/docs >/dev/null 2>&1; then
-                echo "✅ Health check passed - API docs accessible on port 9000"
-                break
-              elif curl -f -s http://localhost:9000/ >/dev/null 2>&1; then
+            # Health check
+            echo "🏥 Performing health check..."
+            for i in {1..10}; do
+              if curl -f -s http://localhost:9000/ >/dev/null 2>&1; then
                 echo "✅ Health check passed - Server responding on port 9000"
                 break
+              elif docker ps | grep comot-api >/dev/null; then
+                echo "⏳ Container running, waiting for app startup (attempt $i)..."
+                sleep 5
               else
-                echo "⏳ Health check attempt $i failed, retrying..."
-                sleep 10
+                echo "❌ Container stopped unexpectedly"
+                echo "📋 Container logs:"
+                docker logs comot-api --tail 30
+                exit 1
               fi
               
-              if [ $i -eq 5 ]; then
-                echo "❌ Health check failed after 5 attempts"
+              if [ $i -eq 10 ]; then
+                echo "❌ Health check failed after 10 attempts"
                 echo "📋 Container logs:"
                 docker logs comot-api --tail 50
                 echo "📊 Container status:"
                 docker ps -a | grep comot-api
+                echo "📊 Port check:"
+                netstat -tlnp | grep :9000 || echo "Port 9000 not listening"
                 exit 1
               fi
             done
@@ -219,7 +251,10 @@ jobs:
             docker ps | grep comot-api
             echo ""
             echo "🌐 API is now accessible at:"
-            echo "  - Documentation: http://${{ secrets.VPS_HOST }}:9000/docs"
+            echo "  - Base URL: http://${{ secrets.VPS_HOST }}:9000"
+            if curl -s http://localhost:9000/docs >/dev/null 2>&1; then
+              echo "  - Documentation: http://${{ secrets.VPS_HOST }}:9000/docs"
+            fi
             echo ""
             echo "🎉 Deployment completed successfully!"
 
