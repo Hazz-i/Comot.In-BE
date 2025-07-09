@@ -95,6 +95,11 @@ jobs:
             git clone https://github.com/${{ github.repository }} .
 
             # Check Dockerfile
+            if [ -f "dockerfile" ] && [ ! -f "Dockerfile" ]; then
+              echo "📝 Renaming dockerfile to Dockerfile..."
+              mv dockerfile Dockerfile
+            fi
+
             if [ ! -f "Dockerfile" ]; then
               echo "❌ Dockerfile not found"
               ls -la
