@@ -132,7 +132,7 @@ jobs:
               exit 1
             }
 
-            # Create .env file exactly like your local version
+            # Create .env file with exact same format as local
             echo "📝 Creating .env file..."
             cat > .env << 'EOF'
             POSTGRES_USER=${{ secrets.POSTGRES_USER }}
@@ -148,6 +148,24 @@ jobs:
 
             NODE_API_BASE=${{ secrets.NODE_API_BASE }}
             EOF
+
+            # Verify .env file content (show exact structure)
+            echo "🔍 Environment file verification:"
+            echo "File size: $(wc -c < .env) bytes"
+            echo "Line count: $(wc -l < .env)"
+            echo "Non-empty lines: $(grep -c . .env)"
+            echo "Sample lines (masked):"
+            head -3 .env | sed 's/=.*$/=***MASKED***/'
+
+            # Test if file is properly formatted
+            if grep -q "POSTGRES_HOST=" .env && grep -q "POSTGRES_USER=" .env; then
+              echo "✅ Required environment variables found in .env"
+            else
+              echo "❌ Missing required environment variables in .env"
+              echo "Actual content:"
+              cat .env
+              exit 1
+            fi
 
             # Debug environment variables
             echo "🔍 Debugging environment setup..."

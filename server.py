@@ -7,6 +7,7 @@ import dotenv
 
 import requests
 import datetime
+from sqlalchemy import text
 
 # Import dari modules lokal
 from utils.database import SessionLocal, engine
@@ -825,11 +826,23 @@ def health_check():
 def root():
     return {"message": "Comot.in API is running", "status": "ok"}
 
+# Update the db-test endpoint
 @app.get("/db-test")
 def test_database_connection(db: Session = Depends(get_db)):
     try:
-        # Test simple query
-        db.execute("SELECT 1")
-        return {"status": "connected", "database": "postgresql"}
+        # Fix SQLAlchemy syntax
+        result = db.execute(text("SELECT 1 as test"))
+        data = result.fetchone()
+        return {
+            "status": "connected", 
+            "database": "postgresql",
+            "host": os.getenv("POSTGRES_HOST", "unknown"),
+            "test_result": data[0] if data else None,
+            "timestamp": datetime.datetime.utcnow()
+        }
     except Exception as e:
-        return {"status": "disconnected", "error": str(e)}
+        return {
+            "status": "disconnected", 
+            "error": str(e),
+            "timestamp": datetime.datetime.utcnow()
+        }
