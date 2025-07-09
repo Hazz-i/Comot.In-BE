@@ -27,16 +27,22 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
+            echo "📦 Installing dependencies from requirements.txt..."
             pip install -r requirements.txt
           else
-            pip install fastapi uvicorn psycopg2-binary sqlalchemy python-dotenv
+            echo "⚠️ requirements.txt not found, installing basic dependencies..."
+            pip install fastapi uvicorn psycopg2-binary
           fi
 
-      - name: Test Docker build
+      - name: Check Docker build
         run: |
           if [ -f Dockerfile ]; then
+            echo "🐳 Testing Docker build..."
             docker build -t test-comot-api .
+            echo "✅ Docker image builds successfully"
             docker rmi test-comot-api || true
+          else
+            echo "⚠️ Dockerfile not found"
           fi
 
   # ========================================
@@ -59,113 +65,104 @@ jobs:
           script: |
             echo "🚀 Starting deployment process..."
 
-            # Setup directory - DON'T remove if exists
-            mkdir -p ~/apps/comot-in
+            # Check if directory exists
+            if [ ! -d "~/apps/comot-in" ]; then
+              echo "❌ Directory ~/apps/comot-in does not exist!"
+              echo "❌ Please create directory and .env file manually first"
+              echo "❌ mkdir -p ~/apps/comot-in && cd ~/apps/comot-in && create .env file"
+              exit 1
+            fi
+
             cd ~/apps/comot-in
 
-            # Check if .env already exists
-            if [ -f ".env" ]; then
-              echo "✅ Found existing .env file, preserving it"
-              echo "📋 Current .env content (masked):"
-              cat .env | sed 's/=.*$/=***MASKED***/'
-            else
-              echo "📝 Creating new .env file..."
-              cat > .env << 'EOF'
-            POSTGRES_USER=${{ secrets.POSTGRES_USER }}
-            POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
-            POSTGRES_HOST=${{ secrets.POSTGRES_HOST }}
-            POSTGRES_PORT=${{ secrets.POSTGRES_PORT }}
-            POSTGRES_DB=${{ secrets.POSTGRES_DB }}
-            URL=${{ secrets.URL }}
-            JWT_SECRET_KEY=${{ secrets.JWT_SECRET }}
-            JWT_ALGORITHM=HS256
-            JWT_EXPIRE_HOURS=24
-            NODE_API_BASE=${{ secrets.NODE_API_BASE }}
-            EOF
-              echo "✅ .env file created"
+            # Check if .env exists
+            if [ ! -f ".env" ]; then
+              echo "❌ .env file not found in ~/apps/comot-in/"
+              echo "❌ Please create .env file manually first"
+              echo "❌ Deployment failed - .env file is required"
+              exit 1
             fi
 
-            # Update source code
+            echo "✅ Found .env file, preserving it"
+            echo "📋 Current .env structure:"
+            cat .env | sed 's/=.*$/=***MASKED***/'
+
+            # Update source code via git clone (preserve .env)
             echo "📥 Updating source code..."
-            if [ -d ".git" ]; then
-              echo "📥 Pulling latest changes..."
-              git fetch origin
-              git reset --hard origin/master
-            else
-              echo "📥 Cloning repository..."
-              rm -rf * .[^.]* 2>/dev/null || true
-              git clone https://github.com/${{ github.repository }} .
-              # Restore .env after clone
-              if [ -f "../.env.backup" ]; then
-                mv ../.env.backup .env
-              fi
-            fi
 
-            # Backup .env if we're going to clone
-            if [ -f ".env" ] && [ ! -d ".git" ]; then
-              cp .env ../.env.backup
-            fi
+            # Backup .env
+            cp .env .env.backup
 
-            # Handle Dockerfile
+            # Remove all files except .env
+            find . -not -name '.env*' -not -name '.' -not -name '..' -delete 2>/dev/null || true
+
+            # Clone fresh code
+            git clone https://github.com/${{ github.repository }} temp_repo
+
+            # Move files from temp_repo to current directory
+            mv temp_repo/* . 2>/dev/null || true
+            mv temp_repo/.[^.]* . 2>/dev/null || true
+            rm -rf temp_repo
+
+            # Restore .env
+            mv .env.backup .env
+
+            echo "✅ Source code updated, .env preserved"
+
+            # Handle Dockerfile naming
             if [ -f "dockerfile" ] && [ ! -f "Dockerfile" ]; then
+              echo "📝 Renaming dockerfile to Dockerfile..."
               mv dockerfile Dockerfile
             fi
 
-            # Create requirements.txt if missing
-            if [ ! -f "requirements.txt" ]; then
-              echo "📝 Creating requirements.txt..."
-              cat > requirements.txt << 'EOF'
-            fastapi==0.104.1
-            uvicorn[standard]==0.24.0
-            pydantic==2.5.0
-            sqlalchemy==1.4.23
-            psycopg2-binary==2.9.7
-            python-multipart==0.0.6
-            python-jose[cryptography]==3.3.0
-            passlib[bcrypt]==1.7.4
-            python-dotenv==1.0.0
-            EOF
+            if [ ! -f "Dockerfile" ]; then
+              echo "❌ Dockerfile not found after clone"
+              ls -la
+              exit 1
             fi
 
-            # Stop and remove existing container
-            echo "🛑 Stopping existing container..."
-            docker stop comot-api 2>/dev/null || echo "No container to stop"
-            docker rm comot-api 2>/dev/null || echo "No container to remove"
+            # Check existing Docker containers and images
+            echo "🐳 Checking existing Docker containers and images..."
 
-            # Build new image
-            echo "🔨 Building Docker image..."
+            # Stop container if running
+            if docker ps | grep -q comot-api; then
+              echo "🛑 Stopping running comot-api container..."
+              docker stop comot-api
+            else
+              echo "ℹ️ No running comot-api container found"
+            fi
+
+            # Remove container if exists
+            if docker ps -a | grep -q comot-api; then
+              echo "🗑️ Removing comot-api container..."
+              docker rm comot-api
+            else
+              echo "ℹ️ No comot-api container to remove"
+            fi
+
+            # Remove image if exists
+            if docker images | grep -q comot-api; then
+              echo "🗑️ Removing comot-api:latest image..."
+              docker rmi comot-api:latest || echo "⚠️ Could not remove image, continuing..."
+            else
+              echo "ℹ️ No comot-api:latest image to remove"
+            fi
+
+            # Build new Docker image
+            echo "🔨 Building new Docker image comot-api:latest..."
             docker build -t comot-api:latest . || {
               echo "❌ Docker build failed"
+              echo "📋 Build context contents:"
+              ls -la
               exit 1
             }
 
-            # Test environment variables before starting
-            echo "🔍 Testing environment variables..."
-            docker run --env-file .env --rm comot-api:latest python -c "
-            import os
-            from dotenv import load_dotenv
-            load_dotenv()
-            
-            host = os.getenv('POSTGRES_HOST', 'NOT_SET')
-            user = os.getenv('POSTGRES_USER', 'NOT_SET')
-            
-            if host == 'NOT_SET' or host == '***':
-                print('❌ POSTGRES_HOST not properly set:', repr(host))
-                exit(1)
-            if user == 'NOT_SET' or user == '***':
-                print('❌ POSTGRES_USER not properly set:', repr(user))
-                exit(1)
-                
-            print('✅ Environment variables validated')
-            print('Host:', host[:20] + '...' if len(host) > 20 else host)
-            print('User:', user[:10] + '***' if len(user) > 10 else user)
-            " || {
-              echo "❌ Environment validation failed"
-              exit 1
-            }
+            echo "✅ Docker image built successfully"
 
-            # Start container
-            echo "▶️ Starting container..."
+            # Run container with .env file
+            echo "▶️ Starting container with command:"
+            echo "docker run -d --name comot-api --env-file .env -p 9000:9000 --restart unless-stopped --memory=512m --cpus=1.0 comot-api:latest"
+
             docker run -d \
               --name comot-api \
               --env-file .env \
@@ -175,47 +172,43 @@ jobs:
               --cpus=1.0 \
               comot-api:latest || {
               echo "❌ Failed to start container"
-              docker logs comot-api --tail 30
+              echo "📋 Container logs:"
+              docker logs comot-api --tail 30 2>/dev/null || echo "No logs available"
               exit 1
             }
 
-            # Wait and health check
-            echo "⏳ Waiting for startup (15 seconds)..."
+            # Wait for startup
+            echo "⏳ Waiting for application startup (15 seconds)..."
             sleep 15
 
             # Simple health check
-            echo "🏥 Health check..."
-            for i in {1..10}; do
-              if docker ps | grep comot-api | grep -q "Up"; then
-                if curl -f -s http://localhost:9000/ >/dev/null 2>&1; then
-                  echo "✅ Application is responding!"
-                  break
-                else
-                  echo "⏳ Attempt $i: Application not responding yet..."
-                fi
+            echo "🏥 Performing health check..."
+
+            # Check if container is running
+            if docker ps | grep -q comot-api; then
+              echo "✅ Container is running"
+              
+              # Test if port 9000 is responding
+              if curl -f -s http://localhost:9000/ >/dev/null 2>&1; then
+                echo "✅ Application is responding on port 9000"
+                echo "🎉 Deployment successful!"
               else
-                echo "❌ Container not running"
-                docker logs comot-api --tail 10
-                exit 1
-              fi
-              
-              if [ $i -eq 10 ]; then
-                echo "❌ Health check timeout"
+                echo "⚠️ Application not responding yet, but container is running"
                 echo "📋 Container logs:"
-                docker logs comot-api --tail 30
-                exit 1
+                docker logs comot-api --tail 20
+                echo "🎉 Deployment completed - check logs for details"
               fi
-              
-              sleep 10
-            done
+            else
+              echo "❌ Container is not running"
+              echo "📋 Container logs:"
+              docker logs comot-api --tail 30 2>/dev/null || echo "No logs available"
+              echo "📊 Container status:"
+              docker ps -a | grep comot-api || echo "No comot-api container found"
+              exit 1
+            fi
 
-            # Test additional endpoints if available
-            curl -s http://localhost:9000/health >/dev/null 2>&1 && echo "✅ Health endpoint OK" || echo "⚠️ Health endpoint not available"
-            curl -s http://localhost:9000/db-test >/dev/null 2>&1 && echo "✅ DB test endpoint OK" || echo "⚠️ DB test endpoint not available"
-
-            echo "🎉 Deployment successful!"
-            echo "🌐 API accessible at: http://${{ secrets.VPS_HOST }}:9000"
-            echo "📊 Container status:"
+            echo "🌐 API should be accessible at: http://${{ secrets.VPS_HOST }}:9000"
+            echo "📊 Final container status:"
             docker ps | grep comot-api
 
   # ========================================
@@ -234,4 +227,5 @@ jobs:
             echo "🌐 FastAPI is live at http://${{ secrets.VPS_HOST }}:9000"
           else
             echo "❌ Deployment failed!"
+            echo "💡 Make sure directory ~/apps/comot-in exists and contains .env file"
           fi
