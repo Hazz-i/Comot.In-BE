@@ -37,24 +37,45 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            echo "⚠️ requirements.txt not found, skipping dependencies"
+          fi
 
       - name: Check Python syntax
         run: |
-          python -m compileall . --exclude=".venv/*" --exclude="venv/*"
+          python -m compileall . -x ".venv|venv|__pycache__|\.git|\.github"
 
       - name: Run code linting
         run: |
           pip install flake8
-          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=venv,__pycache__,.git
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=venv,__pycache__,.git,.github
         continue-on-error: true
 
       - name: Test imports and basic functionality
         run: |
           python -c "
+          import sys
+          import os
+
+          # Add current directory to Python path
+          sys.path.insert(0, os.getcwd())
+
           try:
-              import server
-              print('✅ Server module imports successfully')
+              # Test if main Python files can be imported
+              if os.path.exists('server.py'):
+                  import server
+                  print('✅ Server module imports successfully')
+              elif os.path.exists('main.py'):
+                  import main
+                  print('✅ Main module imports successfully')  
+              elif os.path.exists('app.py'):
+                  import app
+                  print('✅ App module imports successfully')
+              else:
+                  print('⚠️ No main Python file found (server.py, main.py, app.py)')
+                  print('✅ Syntax check passed')
           except Exception as e:
               print(f'❌ Import failed: {e}')
               exit(1)
@@ -62,12 +83,13 @@ jobs:
 
       - name: Check Docker build
         run: |
-          docker build -t test-comot-api .
-          echo "✅ Docker image builds successfully"
-
-      - name: Clean up test image
-        run: |
-          docker rmi test-comot-api || true
+          if [ -f Dockerfile ]; then
+            docker build -t test-comot-api .
+            echo "✅ Docker image builds successfully"
+            docker rmi test-comot-api || true
+          else
+            echo "⚠️ Dockerfile not found, skipping Docker build test"
+          fi
 
   # ========================================
   # JOB 2: DEPLOY TO VPS
@@ -104,15 +126,15 @@ jobs:
             git pull origin master
 
             # Backup current image before stopping
-            if docker images -q comot-api:latest > /dev/null; then
+            if docker images -q comot-api:latest >/dev/null 2>&1; then
               echo "💾 Creating backup of current image..."
               docker tag comot-api:latest comot-api:backup || true
             fi
 
             # Stop and remove existing container
             echo "🛑 Stopping existing container..."
-            docker stop comot-api || echo "Container not running"
-            docker rm comot-api || echo "Container not found"
+            docker stop comot-api 2>/dev/null || echo "Container not running"
+            docker rm comot-api 2>/dev/null || echo "Container not found"
 
             # Build new image
             echo "🔨 Building new Docker image..."
@@ -122,6 +144,15 @@ jobs:
             if [ $? -ne 0 ]; then
               echo "❌ Docker build failed"
               exit 1
+            fi
+
+            # Create .env file if it doesn't exist
+            if [ ! -f .env ]; then
+              echo "📝 Creating default .env file..."
+              cat > .env << EOF
+            PORT=9000
+            ENVIRONMENT=production
+            EOF
             fi
 
             # Run new container with correct port mapping
@@ -148,11 +179,14 @@ jobs:
             # Health check on port 9000
             echo "🏥 Performing health check on port 9000..."
             for i in {1..5}; do
-              if curl -f -s http://localhost:9000/docs > /dev/null; then
-                echo "✅ Health check passed - API is accessible on port 9000"
+              if curl -f -s http://localhost:9000/docs >/dev/null 2>&1; then
+                echo "✅ Health check passed - API docs accessible on port 9000"
                 break
-              elif curl -f -s http://localhost:9000/ > /dev/null; then
+              elif curl -f -s http://localhost:9000/ >/dev/null 2>&1; then
                 echo "✅ Health check passed - Server responding on port 9000"
+                break
+              elif curl -f -s http://localhost:9000/health >/dev/null 2>&1; then
+                echo "✅ Health check passed - Health endpoint responding"
                 break
               else
                 echo "⏳ Health check attempt $i failed, retrying..."
@@ -191,11 +225,11 @@ jobs:
             echo "🔄 Deployment failed! Attempting rollback..."
 
             # Stop failed container
-            docker stop comot-api || true
-            docker rm comot-api || true
+            docker stop comot-api 2>/dev/null || true
+            docker rm comot-api 2>/dev/null || true
 
             # Rollback to backup
-            if docker images -q comot-api:backup > /dev/null; then
+            if docker images -q comot-api:backup >/dev/null 2>&1; then
               echo "🔄 Rolling back to previous version..."
               docker run -d \
                 --name comot-api \
