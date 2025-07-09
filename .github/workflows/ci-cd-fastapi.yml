@@ -5,6 +5,7 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
@@ -26,14 +27,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Cache pip dependencies
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -48,61 +41,28 @@ jobs:
       - name: Check Python syntax
         run: |
           echo "🔍 Checking Python syntax..."
-          python -m compileall . -x ".venv|venv|__pycache__|\.git|\.github" || echo "⚠️ Some syntax issues found, but continuing..."
-
-      - name: Run code linting
-        run: |
-          echo "🔍 Running code linting..."
-          pip install flake8
-          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=venv,__pycache__,.git,.github || echo "⚠️ Linting issues found"
-        continue-on-error: true
+          python -m compileall . -x ".venv|venv|__pycache__|\.git|\.github" || echo "⚠️ Continuing..."
 
       - name: Test Python files
         run: |
           echo "📝 Testing Python environment..."
-
-          # Set environment variables to avoid None errors
-          export PORT=9000
-          export ENVIRONMENT=test
-
-          # List Python files
-          echo "📁 Python files found:"
-          find . -name "*.py" -not -path "./venv/*" -not -path "./.venv/*" | head -5
-
-          # Test Python environment
-          python -c "
-          import os
-          import sys
-          print('✅ Python environment is working')
-          print('📁 Current directory:', os.getcwd())
-          print('🐍 Python version:', sys.version.split()[0])
-          "
-
-          # Check main files
+          python -c "print('✅ Python environment is working')"
           if [ -f "server.py" ]; then
             echo "✅ Found server.py"
-          elif [ -f "main.py" ]; then
-            echo "✅ Found main.py"
-          elif [ -f "app.py" ]; then
-            echo "✅ Found app.py"
           else
-            echo "⚠️ No main Python file found"
+            echo "⚠️ No server.py found"
           fi
-
           echo "✅ Basic checks completed"
 
       - name: Check Docker build
         run: |
           if [ -f Dockerfile ]; then
             echo "🐳 Testing Docker build..."
-            docker build -t test-comot-api . || {
-              echo "❌ Docker build failed"
-              exit 1
-            }
+            docker build -t test-comot-api .
             echo "✅ Docker image builds successfully"
             docker rmi test-comot-api || true
           else
-            echo "⚠️ Dockerfile not found, skipping Docker build test"
+            echo "⚠️ Dockerfile not found"
           fi
 
   # ========================================
@@ -125,14 +85,8 @@ jobs:
           script: |
             echo "🚀 Starting deployment process..."
 
-            # Clean up and prepare directory
-            if [ -d "~/apps/comot-in" ]; then
-              echo "🗑️ Cleaning existing directory..."
-              rm -rf ~/apps/comot-in
-            fi
-
-            # Create fresh directory and clone
-            echo "📁 Creating application directory..."
+            # Clean directory
+            rm -rf ~/apps/comot-in
             mkdir -p ~/apps/comot-in
             cd ~/apps/comot-in
 
@@ -140,151 +94,54 @@ jobs:
             echo "📥 Cloning repository..."
             git clone https://github.com/${{ github.repository }} .
 
-            # Check for Dockerfile (case insensitive)
-            if [ -f "dockerfile" ] && [ ! -f "Dockerfile" ]; then
-              echo "📝 Renaming dockerfile to Dockerfile..."
-              mv dockerfile Dockerfile
-            fi
-
-            # Verify required files exist
+            # Check Dockerfile
             if [ ! -f "Dockerfile" ]; then
-              echo "❌ Dockerfile not found in repository"
-              echo "📁 Files in directory:"
+              echo "❌ Dockerfile not found"
               ls -la
               exit 1
             fi
 
-            echo "✅ Dockerfile found"
-
-            # Check requirements.txt
+            # Create requirements if missing
             if [ ! -f "requirements.txt" ]; then
-              echo "📝 Creating basic requirements.txt..."
+              echo "📝 Creating requirements.txt..."
               cat > requirements.txt << 'EOF'
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
-python-multipart==0.0.6
-EOF
+            fastapi==0.104.1
+            uvicorn[standard]==0.24.0
+            pydantic==2.5.0
+            EOF
             fi
 
-            # Backup current image if exists
-            if docker images -q comot-api:latest >/dev/null 2>&1; then
-              echo "💾 Creating backup of current image..."
-              docker tag comot-api:latest comot-api:backup || true
-            fi
+            # Stop existing container
+            docker stop comot-api 2>/dev/null || true
+            docker rm comot-api 2>/dev/null || true
 
-            # Stop and remove existing container
-            echo "🛑 Stopping existing container..."
-            docker stop comot-api 2>/dev/null || echo "Container not running"
-            docker rm comot-api 2>/dev/null || echo "Container not found"
+            # Build image
+            echo "🔨 Building Docker image..."
+            docker build -t comot-api:latest .
 
-            # Build new image with verbose output
-            echo "🔨 Building new Docker image..."
-            docker build -t comot-api:latest . --no-cache || {
-              echo "❌ Docker build failed"
-              echo "📋 Build context files:"
-              ls -la
-              echo "📋 Dockerfile content:"
-              cat Dockerfile
-              exit 1
-            }
-
-            echo "✅ Docker image built successfully"
-
-            # Create .env file
-            echo "📝 Creating .env file..."
+            # Create env file
             cat > .env << 'EOF'
-PORT=9000
-ENVIRONMENT=production
-EOF
+            PORT=9000
+            ENVIRONMENT=production
+            EOF
 
-            # Run new container
-            echo "▶️ Starting new container on port 9000..."
+            # Run container
+            echo "▶️ Starting container..."
             docker run -d \
               --name comot-api \
               --env-file .env \
               -p 9000:9000 \
               --restart unless-stopped \
-              --memory=512m \
-              --cpus=1.0 \
-              comot-api:latest || {
-              echo "❌ Failed to start container"
-              echo "📋 Container logs:"
-              docker logs comot-api 2>/dev/null || true
-              exit 1
-            }
+              comot-api:latest
 
-            # Wait for startup
-            echo "⏳ Waiting for application startup..."
-            sleep 20
-
-            # Health check
-            echo "🏥 Performing health check..."
-            for i in {1..10}; do
-              if curl -f -s http://localhost:9000/ >/dev/null 2>&1; then
-                echo "✅ Health check passed - Server responding on port 9000"
-                break
-              elif docker ps | grep comot-api >/dev/null; then
-                echo "⏳ Container running, waiting for app startup (attempt $i)..."
-                sleep 5
-              else
-                echo "❌ Container stopped unexpectedly"
-                echo "📋 Container logs:"
-                docker logs comot-api --tail 30
-                exit 1
-              fi
-              
-              if [ $i -eq 10 ]; then
-                echo "❌ Health check failed after 10 attempts"
-                echo "📋 Container logs:"
-                docker logs comot-api --tail 50
-                echo "📊 Container status:"
-                docker ps -a | grep comot-api
-                echo "📊 Port check:"
-                netstat -tlnp | grep :9000 || echo "Port 9000 not listening"
-                exit 1
-              fi
-            done
-
-            # Final status
-            echo "📊 Deployment Status:"
-            docker ps | grep comot-api
-            echo ""
-            echo "🌐 API is now accessible at:"
-            echo "  - Base URL: http://${{ secrets.VPS_HOST }}:9000"
-            if curl -s http://localhost:9000/docs >/dev/null 2>&1; then
-              echo "  - Documentation: http://${{ secrets.VPS_HOST }}:9000/docs"
-            fi
-            echo ""
-            echo "🎉 Deployment completed successfully!"
-
-      - name: Rollback on failure
-        if: failure()
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          password: ${{ secrets.VPS_PASSWORD }}
-          port: ${{ secrets.VPS_PORT || 22 }}
-          script: |
-            echo "🔄 Deployment failed! Attempting rollback..."
-
-            # Stop failed container
-            docker stop comot-api 2>/dev/null || true
-            docker rm comot-api 2>/dev/null || true
-
-            # Rollback to backup
-            if docker images -q comot-api:backup >/dev/null 2>&1; then
-              echo "🔄 Rolling back to previous version..."
-              docker run -d \
-                --name comot-api \
-                --env-file ~/apps/comot-in/.env \
-                -p 9000:9000 \
-                --restart unless-stopped \
-                comot-api:backup
-              echo "✅ Rollback completed"
+            # Wait and health check
+            sleep 15
+            if curl -f -s http://localhost:9000/ >/dev/null 2>&1; then
+              echo "✅ Deployment successful!"
             else
-              echo "❌ No backup image available"
+              echo "❌ Health check failed"
+              docker logs comot-api --tail 20
+              exit 1
             fi
 
   # ========================================
@@ -301,8 +158,6 @@ EOF
           if [ "${{ needs.deploy.result }}" == "success" ]; then
             echo "✅ Deployment successful!"
             echo "🌐 FastAPI is live at http://${{ secrets.VPS_HOST }}:9000"
-            echo "📖 API docs at http://${{ secrets.VPS_HOST }}:9000/docs"
           else
             echo "❌ Deployment failed!"
-            echo "Check logs for details"
           fi
