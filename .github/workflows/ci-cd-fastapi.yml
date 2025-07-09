@@ -65,21 +65,20 @@ jobs:
           script: |
             echo "🚀 Starting deployment process..."
 
-            # Check if directory exists
-            if [ ! -d "~/apps/comot-in" ]; then
+            # Navigate to target directory
+            cd ~/apps/comot-in || {
               echo "❌ Directory ~/apps/comot-in does not exist!"
-              echo "❌ Please create directory and .env file manually first"
-              echo "❌ mkdir -p ~/apps/comot-in && cd ~/apps/comot-in && create .env file"
+              echo "❌ Current location: $(pwd)"
+              echo "❌ Available directories in ~/apps/:"
+              ls -la ~/apps/ || echo "~/apps/ does not exist"
               exit 1
-            fi
-
-            cd ~/apps/comot-in
+            }
 
             # Check if .env exists
             if [ ! -f ".env" ]; then
               echo "❌ .env file not found in ~/apps/comot-in/"
-              echo "❌ Please create .env file manually first"
-              echo "❌ Deployment failed - .env file is required"
+              echo "❌ Current directory contents:"
+              ls -la
               exit 1
             fi
 
